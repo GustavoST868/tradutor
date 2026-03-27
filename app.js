@@ -14,7 +14,8 @@ const state = {
     scale: 1.5,
     isResizing: false,
     selectedText: '',
-    translations: []
+    translations: [],
+    translationCache: {}
 };
 
 // Elementos DOM
@@ -72,7 +73,7 @@ function bindEvents() {
 
     // Seleção de texto
     document.addEventListener('mouseup', handleTextSelection);
-    document.addEventListener('selectionchange', debounce(updateTranslateButton, 100));
+    document.addEventListener('selectionchange', debounce(updateTranslateButton, 300));
 
     // Teclado
     document.addEventListener('keydown', handleKeyboard);
@@ -325,24 +326,23 @@ async function handleTranslate() {
     if (!text) return;
 
     hideTranslateButton();
+
+    // Verificar cache se já foi traduzido nesta sessão
+    if (state.translationCache[text]) {
+        addTranslation(text, state.translationCache[text]);
+        return;
+    }
+
     elements.loadingOverlay.classList.remove('hidden');
 
     try {
         const translatedText = await translateText(text);
+        state.translationCache[text] = translatedText; // Salvar no cache
         addTranslation(text, translatedText);
     } catch (error) {
         console.error('Erro na tradução:', error);
 
-        // Mesmo em caso de erro, adiciona uma mensagem explicativa
-        const errorMessage = `⚠️ Não foi possível traduzir automaticamente.
-
-Erro: ${error.message}
-
-Texto original mantido:
-"${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"
-
-💡 Dica: Para tradução automática, edite o arquivo config.js e configure sua API preferida.`;
-
+        const errorMessage = `⚠️ Não foi possível traduzir automaticamente (Erro: ${error.message}). Texto original: "${text.substring(0, 100)}..."`;
         addTranslation(text, errorMessage);
     } finally {
         elements.loadingOverlay.classList.add('hidden');
@@ -365,16 +365,23 @@ async function translateText(text) {
     const sourceLang = await detectLanguage(text);
     const targetLang = 'PT'; // Português
 
-    // Tentar MyMemory primeiro (mais acessível)
+    // 1. Tentar MyMemory (mais acessível)
     if (CONFIG.myMemory.enabled) {
         try {
             return await translateWithMyMemory(text, sourceLang, targetLang);
         } catch (error) {
-            console.warn('MyMemory falhou, tentando fallback:', error);
+            console.warn('MyMemory falhou, tentando Google Unofficial:', error);
         }
     }
 
-    // Se tiver DeepL configurado, tentar
+    // 2. Tentar Google Unofficial (mais estável como fallback)
+    try {
+        return await translateWithGoogleUnofficial(text, sourceLang, targetLang);
+    } catch (error) {
+        console.warn('Google Unofficial falhou:', error);
+    }
+
+    // 3. Se tiver DeepL configurado, tentar
     if (CONFIG.deepl?.enabled && CONFIG.deepl?.apiKey) {
         try {
             return await translateWithDeepL(text, sourceLang, targetLang);
@@ -434,6 +441,19 @@ async function translateWithMyMemory(text, source, target) {
     }
 
     return data.responseData.translatedText;
+}
+
+/**
+ * Traduz usando Google Translate (API não oficial estável)
+ */
+async function translateWithGoogleUnofficial(text, source, target) {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source.toLowerCase()}&tl=${target.toLowerCase()}&dt=t&q=${encodeURIComponent(text)}`;
+    
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Google Translate indisponível');
+    
+    const data = await response.json();
+    return data[0].map(s => s[0]).join('');
 }
 
 /**
@@ -497,11 +517,6 @@ function addTranslation(original, translated) {
     const item = document.createElement('div');
     item.className = 'translation-item';
     item.innerHTML = `
-        <div class="translation-header">
-            <span class="translation-lang">Tradução</span>
-            <span class="translation-time">${timestamp}</span>
-        </div>
-        <div class="translation-original">${escapeHtml(original)}</div>
         <div class="translation-result">${escapeHtml(translated)}</div>
     `;
 
@@ -509,8 +524,9 @@ function addTranslation(original, translated) {
     elements.translationPlaceholder.style.display = 'none';
     elements.translationContent.classList.add('active');
 
-    // Adicionar ao container
-    elements.translationContent.insertBefore(item, elements.translationContent.firstChild);
+    // Limpar anteriores e adicionar o novo (apenas o texto traduzido)
+    elements.translationContent.innerHTML = '';
+    elements.translationContent.appendChild(item);
 
     // Salvar no estado
     state.translations.unshift({ original, translated, timestamp });
